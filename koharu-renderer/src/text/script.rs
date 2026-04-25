@@ -33,18 +33,9 @@ pub fn writing_mode_for_block(block: &RenderBlock) -> WritingMode {
     }
 }
 
-pub fn is_latin_only(text: &str) -> bool {
-    let script_map = CodePointMapData::<IcuScript>::new();
-    text.chars().all(|c| {
-        matches!(
-            script_map.get(c),
-            IcuScript::Latin | IcuScript::Common | IcuScript::Inherited
-        )
-    })
-}
 
 pub fn normalize_translation_for_layout(text: &str, language: Option<&str>) -> String {
-    if is_latin_only(text) {
+    if !is_cjk_text(text) {
         let mapper = CaseMapper::new();
         let lang_id: LanguageIdentifier = language
             .and_then(|l| l.parse().ok())
@@ -230,7 +221,11 @@ fn is_cjk_text(text: &str) -> bool {
     text.chars().any(|c| {
         matches!(
             script_map.get(c),
-            IcuScript::Han | IcuScript::Hiragana | IcuScript::Katakana | IcuScript::Bopomofo
+            IcuScript::Han
+                | IcuScript::Hiragana
+                | IcuScript::Katakana
+                | IcuScript::Hangul
+                | IcuScript::Bopomofo
         )
     })
 }
@@ -241,15 +236,10 @@ mod tests {
     use crate::types::RenderBlock;
 
     use super::{
-        font_families_for_text, is_latin_only, normalize_translation_for_layout,
+        font_families_for_text, normalize_translation_for_layout,
         shaping_direction_for_text, writing_mode_for_block,
     };
 
-    #[test]
-    fn latin_detection_is_reasonable() {
-        assert!(is_latin_only("hello!?"));
-        assert!(!is_latin_only("こんにちは"));
-    }
 
     #[test]
     fn normalize_uppercases_latin_only() {
@@ -263,10 +253,31 @@ mod tests {
             normalize_translation_for_layout("kimse", Some("tr")),
             "KİMSE"
         );
+        // Test with subtag
         assert_eq!(
-            normalize_translation_for_layout("dolaşıyordu", Some("tr")),
-            "DOLAŞIYORDU"
+            normalize_translation_for_layout("ışık", Some("tr-TR")),
+            "IŞIK"
         );
+    }
+
+    #[test]
+    fn normalize_handles_other_scripts() {
+        // Cyrillic
+        assert_eq!(
+            normalize_translation_for_layout("привет", None),
+            "ПРИВЕТ"
+        );
+        // Greek
+        assert_eq!(
+            normalize_translation_for_layout("γειά σου", None),
+            "ΓΕΙΆ ΣΟΥ"
+        );
+    }
+
+    #[test]
+    fn normalize_skips_cjk_scripts() {
+        assert_eq!(normalize_translation_for_layout("你好", None), "你好");
+        assert_eq!(normalize_translation_for_layout("안녕하세요", None), "안녕하세요");
     }
 
     #[test]
