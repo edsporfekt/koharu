@@ -1,7 +1,7 @@
 use harfrust::{Direction, Script, Tag};
+use icu::properties::{CodePointMapData, props::Script as IcuScript};
 use icu_casemap::CaseMapper;
 use icu_locale::LanguageIdentifier;
-use icu::properties::{CodePointMapData, props::Script as IcuScript};
 use unicode_bidi::BidiInfo;
 
 use crate::layout::WritingMode;
