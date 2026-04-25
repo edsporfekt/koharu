@@ -1,6 +1,6 @@
 use harfrust::{Direction, Script, Tag};
 use icu_casemap::CaseMapper;
-use icu_locid::Locale;
+use icu_locale::Locale;
 use icu::properties::{CodePointMapData, props::Script as IcuScript};
 use unicode_bidi::BidiInfo;
 
