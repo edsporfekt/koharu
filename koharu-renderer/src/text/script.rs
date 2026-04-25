@@ -46,9 +46,7 @@ pub fn is_latin_only(text: &str) -> bool {
 pub fn normalize_translation_for_layout(text: &str, language: Option<&str>) -> String {
     if is_latin_only(text) {
         let mapper = CaseMapper::new();
-        let locale: Locale = language
-            .and_then(|l| l.parse().ok())
-            .unwrap_or(Locale::UND);
+        let locale: Locale = language.and_then(|l| l.parse().ok()).unwrap_or(Locale::UND);
 
         mapper.uppercase_to_string(text, &locale)
     } else {
