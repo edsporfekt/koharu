@@ -224,7 +224,6 @@ fn is_cjk_text(text: &str) -> bool {
             IcuScript::Han
                 | IcuScript::Hiragana
                 | IcuScript::Katakana
-                | IcuScript::Hangul
                 | IcuScript::Bopomofo
         )
     })
