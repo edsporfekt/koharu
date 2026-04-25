@@ -1,6 +1,6 @@
 use harfrust::{Direction, Script, Tag};
 use icu_casemap::CaseMapper;
-use icu_locale::Locale;
+use icu_locale::LanguageIdentifier;
 use icu::properties::{CodePointMapData, props::Script as IcuScript};
 use unicode_bidi::BidiInfo;
 
@@ -46,9 +46,11 @@ pub fn is_latin_only(text: &str) -> bool {
 pub fn normalize_translation_for_layout(text: &str, language: Option<&str>) -> String {
     if is_latin_only(text) {
         let mapper = CaseMapper::new();
-        let locale: Locale = language.and_then(|l| l.parse().ok()).unwrap_or(Locale::UND);
+        let lang_id: LanguageIdentifier = language
+            .and_then(|l| l.parse().ok())
+            .unwrap_or_else(|| "und".parse().unwrap());
 
-        mapper.uppercase_to_string(text, &locale)
+        mapper.uppercase_to_string(text, &lang_id).to_string()
     } else {
         text.to_string()
     }

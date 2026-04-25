@@ -4721,6 +4721,8 @@ dependencies = [
  "fontdue",
  "harfrust",
  "icu",
+ "icu_casemap",
+ "icu_locale",
  "image",
  "imageproc",
  "once_cell",
