@@ -133,11 +133,11 @@ const GEMINI_MODELS: &[ProviderModelDescriptor] = &[
         name: "Gemini 3.1 Flash Preview",
     },
     ProviderModelDescriptor {
-        id: "gemma4-31b-it",
+        id: "gemma-4-31b-it",
         name: "Gemma 4 31B",
     },
     ProviderModelDescriptor {
-        id: "gemma4-26b-a4b-it",
+        id: "gemma-4-26b-a4b-it",
         name: "Gemma 4 26B",
     },
 ];
