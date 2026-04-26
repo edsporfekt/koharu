@@ -115,6 +115,8 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
     pub max_tokens: Option<u32>,
 }
 
@@ -506,6 +508,9 @@ fn build_gemini_provider(config: ProviderConfig) -> anyhow::Result<Box<dyn AnyPr
     Ok(Box::new(gemini::GeminiProvider {
         http_client: Arc::clone(&config.http_client),
         api_key: required_api_key(&config, "gemini")?,
+        temperature: config.temperature,
+        top_p: config.top_p,
+        top_k: config.top_k,
     }))
 }
 
