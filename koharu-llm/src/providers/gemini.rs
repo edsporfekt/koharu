@@ -152,7 +152,9 @@ mod tests {
             }]
         });
 
-        let parts = resp["candidates"][0]["content"]["parts"].as_array().unwrap();
+        let parts = resp["candidates"][0]["content"]["parts"]
+            .as_array()
+            .unwrap();
         let text = parts
             .iter()
             .filter(|p| p["thought"].as_bool() != Some(true))
