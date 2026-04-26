@@ -352,6 +352,8 @@ async fn provider_catalog(
                         api_key,
                         base_url: base_url.clone(),
                         temperature: None,
+                        top_p: None,
+                        top_k: None,
                         max_tokens: None,
                     };
                     match discover_models(descriptor.id, cfg) {
@@ -428,6 +430,8 @@ pub fn provider_config_from_settings(
             .map(|s| s.expose().to_owned()),
         base_url: stored.and_then(|p| p.base_url.clone()),
         temperature: None,
+        top_p: None,
+        top_k: None,
         max_tokens: None,
     }
 }
