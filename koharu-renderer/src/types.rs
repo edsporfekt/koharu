@@ -55,3 +55,25 @@ pub struct RenderBlock {
     pub text: String,
     pub source_direction: Option<TextDirection>,
 }
+
+/// A binary or alpha mask for non-rectangular text fitting.
+///
+/// Used for collision detection to ensure text stays within bubble boundaries.
+#[derive(Debug, Clone)]
+pub struct MaskData {
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MaskData {
+    /// Returns true if the pixel at (x, y) is part of the bubble (non-background).
+    /// Assumes 0 is background and > 0 is bubble.
+    pub fn is_bubble(&self, x: u32, y: u32) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let idx = (y * self.width + x) as usize;
+        self.data.get(idx).map(|&v| v > 0).unwrap_or(false)
+    }
+}

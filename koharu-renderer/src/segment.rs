@@ -52,21 +52,42 @@ impl LineBreaker {
 
     /// Returns a vector of line break opportunities in the given text.
     pub fn line_break_opportunities(&self, text: &str) -> Vec<LineBreakOpportunity> {
-        self.segmenter
-            .segment_str(text)
-            .map(|break_pos| LineBreakOpportunity {
+        let mut opportunities = Vec::new();
+        let segments = self.segmenter.segment_str(text);
+
+        for break_pos in segments {
+            let is_mandatory = text[..break_pos].chars().next_back().is_some_and(|c| {
+                matches!(
+                    CodePointMapData::<LineBreak>::new().get(c),
+                    LineBreak::MandatoryBreak
+                        | LineBreak::CarriageReturn
+                        | LineBreak::LineFeed
+                        | LineBreak::NextLine
+                )
+            });
+
+            if !is_mandatory && break_pos < text.len() {
+                if let Some(next_char) = text[break_pos..].chars().next() {
+                    if is_kinsoku_not_at_start(next_char) {
+                        continue;
+                    }
+                }
+            }
+
+            if !is_mandatory && break_pos > 0 {
+                if let Some(prev_char) = text[..break_pos].chars().next_back() {
+                    if is_kinsoku_not_at_end(prev_char) {
+                        continue;
+                    }
+                }
+            }
+
+            opportunities.push(LineBreakOpportunity {
                 offset: break_pos,
-                is_mandatory: text[..break_pos].chars().next_back().is_some_and(|c| {
-                    matches!(
-                        CodePointMapData::<LineBreak>::new().get(c),
-                        LineBreak::MandatoryBreak
-                            | LineBreak::CarriageReturn
-                            | LineBreak::LineFeed
-                            | LineBreak::NextLine
-                    )
-                }),
-            })
-            .collect()
+                is_mandatory,
+            });
+        }
+        opportunities
     }
 
     /// Returns shaped-text segments where mandatory break characters are excluded
@@ -91,6 +112,23 @@ impl LineBreaker {
             })
             .collect()
     }
+}
+
+fn is_kinsoku_not_at_start(c: char) -> bool {
+    matches!(
+        c,
+        '、' | '。' | '，' | '．' | '！' | '？' | '）' | '】' | '」' | '』' | '〕' | '〉' | '》'
+            | '］' | '｝' | ',' | '.' | '!' | '?' | ';' | ':' | '…' | '‥' | 'ー' | 'ぁ' | 'ぃ'
+            | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' | 'ァ' | 'ィ' | 'ゥ' | 'ェ'
+            | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ'
+    )
+}
+
+fn is_kinsoku_not_at_end(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '【' | '「' | '『' | '〔' | '〈' | '《' | '［' | '｛' | '(' | '[' | '{'
+    )
 }
 
 impl Default for LineBreaker {

@@ -11,7 +11,8 @@ use skrifa::{
 use crate::font::{Font, font_key};
 use crate::shape::shape_script_runs;
 use crate::text::script::shaping_direction_for_text;
-use crate::types::TextAlign;
+use crate::text::style::parse_styled_segments;
+use crate::types::{MaskData, TextAlign};
 
 pub use crate::segment::{LineBreakOpportunity, LineBreaker, LineSegment};
 pub use crate::shape::{PositionedGlyph, ShapedRun, ShapingOptions, TextShaper};
@@ -61,6 +62,20 @@ pub struct LayoutRun<'a> {
     pub font_size: f32,
 }
 
+/// Temporary storage for runs in the current line to be reordered
+struct LineRun<'a> {
+    shaped: ShapedRun<'a>,
+    level: unicode_bidi::Level,
+}
+
+struct ShapedSegment<'a> {
+    runs: Vec<LineRun<'a>>,
+    advance: f32,
+    range: Range<usize>,
+    next_offset: usize,
+    is_mandatory: bool,
+}
+
 #[derive(Clone)]
 pub struct TextLayout<'a> {
     writing_mode: WritingMode,
@@ -71,6 +86,8 @@ pub struct TextLayout<'a> {
     max_width: Option<f32>,
     max_height: Option<f32>,
     alignment: Option<TextAlign>,
+    mask: Option<&'a MaskData>,
+    badness_exponent: f32,
 }
 
 impl<'a> TextLayout<'a> {
@@ -84,6 +101,8 @@ impl<'a> TextLayout<'a> {
             max_width: None,
             max_height: None,
             alignment: None,
+            mask: None,
+            badness_exponent: 3.0,
         }
     }
 
@@ -122,6 +141,16 @@ impl<'a> TextLayout<'a> {
         self
     }
 
+    pub fn with_mask(mut self, mask: &'a MaskData) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    pub fn with_badness_exponent(mut self, exponent: f32) -> Self {
+        self.badness_exponent = exponent;
+        self
+    }
+
     pub fn run(&self, text: &str) -> Result<LayoutRun<'a>> {
         if let Some(font_size) = self.font_size {
             return self.run_with_size(text, font_size);
@@ -144,9 +173,43 @@ impl<'a> TextLayout<'a> {
             iterations += 1;
             let mid = (low + high) / 2;
             let size = mid as f32;
-            let layout = self.run_with_size(text, size)?;
-            if layout.width <= max_width && layout.height <= max_height {
-                best = Some(layout);
+
+            let mut succeeded = false;
+            let mut current_width_limit = max_width;
+            
+            // Squeezing heuristic: try up to 3 times with reduced width if we have a mask.
+            // This matches MangaTranslator's approach to finding a fit in tight bubbles.
+            let max_squeezes = if self.mask.is_some() { 3 } else { 1 };
+
+            for _ in 0..max_squeezes {
+                // We create a temporary layout with the potentially squeezed width
+                let mut layout_cfg = self.clone();
+                layout_cfg.max_width = Some(current_width_limit);
+                let layout = layout_cfg.run_with_size(text, size)?;
+
+                if layout.width <= current_width_limit && layout.height <= max_height {
+                    // Check for collision with mask if provided
+                    if self.mask.is_some() {
+                        if !self.check_collision(&layout.lines, (0.0, 0.0)) {
+                            best = Some(layout);
+                            succeeded = true;
+                            break;
+                        } else {
+                            // Collision detected, try squeezing narrower to see if it fits better (taller)
+                            current_width_limit *= 0.9;
+                        }
+                    } else {
+                        best = Some(layout);
+                        succeeded = true;
+                        break;
+                    }
+                } else {
+                    // If it doesn't fit even in the bounding box, squeezing narrower won't help (it only makes it taller)
+                    break;
+                }
+            }
+
+            if succeeded {
                 low = mid + 1;
             } else {
                 high = mid - 1;
@@ -154,7 +217,6 @@ impl<'a> TextLayout<'a> {
         }
 
         // If no size fits within constraints, fall back to the smallest size.
-        // This ensures we always render something even if the box is very small.
         if best.is_none() {
             best = Some(self.run_with_size(text, 6.0)?);
         }
@@ -217,12 +279,7 @@ impl<'a> TextLayout<'a> {
         fonts.extend(self.fallback_fonts.iter());
         let mut lines: Vec<LayoutLine<'a>> = Vec::new();
 
-        // Temporary storage for runs in the current line to be reordered
-        struct LineRun<'a> {
-            shaped: ShapedRun<'a>,
-            level: unicode_bidi::Level,
-        }
-        let mut current_line_runs: Vec<LineRun<'a>> = Vec::new();
+        let mut shaped_segments: Vec<ShapedSegment<'a>> = Vec::new();
         let mut line_offset = 0usize;
         let mut current_advance = 0.0f32;
 
@@ -287,9 +344,8 @@ impl<'a> TextLayout<'a> {
             *offset = next_offset;
         };
 
-        for segment in segments {
+        for segment in line_breaker.line_segments(text) {
             let segment_text = &text[segment.range.clone()];
-
             let mut segment_runs = Vec::new();
             let mut segment_advance = 0.0f32;
 
@@ -347,54 +403,135 @@ impl<'a> TextLayout<'a> {
                 }
             }
 
-            let would_overflow = if self.writing_mode.is_vertical() {
-                current_advance.abs() + segment_advance.abs() > max_extent
-            } else {
-                current_advance + segment_advance > max_extent
-            };
+            shaped_segments.push(ShapedSegment {
+                runs: segment_runs,
+                advance: segment_advance,
+                range: segment.range,
+                next_offset: segment.next_offset,
+                is_mandatory: segment.is_mandatory,
+            });
+        }
 
-            if would_overflow && !current_line_runs.is_empty() {
-                finalize_current_line(
-                    &mut current_line_runs,
-                    &mut line_offset,
-                    segment.range.start,
-                    segment.range.start,
-                    &mut lines,
-                    false,
-                );
-                current_advance = 0.0;
-            }
+        // 2. DP to find optimal breaks (Knuth-Plass style).
+        // This minimizes "raggedness" and produces more balanced line lengths for bubbles.
+        let n = shaped_segments.len();
+        if n == 0 {
+            return Ok(LayoutRun {
+                lines: Vec::new(),
+                width: 0.0,
+                height: 0.0,
+                font_size,
+            });
+        }
 
-            current_line_runs.extend(segment_runs);
-            current_advance += segment_advance;
+        let mut min_cost = vec![f32::INFINITY; n + 1];
+        let mut best_prev = vec![0; n + 1];
+        min_cost[0] = 0.0;
 
-            if segment.is_mandatory {
-                // Consecutive mandatory breaks (e.g. "A\n\nB") will drop the empty line:
-                // when segment.is_mandatory and current_line_runs is empty, finalize_current_line
-                // early-returns without pushing a LayoutLine. Consider special-casing mandatory
-                // breaks to push an empty LayoutLine (advance=0, glyphs empty, range=offset..visible_end)
-                // so blank lines are preserved.
-                finalize_current_line(
-                    &mut current_line_runs,
-                    &mut line_offset,
-                    segment.range.end,
-                    segment.next_offset,
-                    &mut lines,
-                    true,
-                );
-                current_advance = 0.0;
+        for i in 1..=n {
+            let mut line_width = 0.0;
+            for j in (0..i).rev() {
+                line_width += shaped_segments[j].advance;
+
+                if max_extent.is_finite() && line_width > max_extent && j < i - 1 {
+                    break;
+                }
+
+                let slack = if max_extent.is_finite() {
+                    (max_extent - line_width).max(0.0)
+                } else {
+                    0.0
+                };
+
+                let badness = slack.powf(self.badness_exponent);
+                let cost = min_cost[j] + badness;
+
+                if cost < min_cost[i] {
+                    min_cost[i] = cost;
+                    best_prev[i] = j;
+                }
+
+                if shaped_segments[j].is_mandatory {
+                    break;
+                }
             }
         }
 
-        // Finalize last line
-        finalize_current_line(
-            &mut current_line_runs,
-            &mut line_offset,
-            text.len(),
-            text.len(),
-            &mut lines,
-            false, // Don't force push a final empty line if the text didn't end with a break
-        );
+        // 3. Reconstruct lines from the DP results.
+        let mut current = n;
+        let mut line_ranges = Vec::new();
+        while current > 0 {
+            let prev = best_prev[current];
+            line_ranges.push(prev..current);
+            current = prev;
+        }
+        line_ranges.reverse();
+
+        for range in line_ranges {
+            let first_segment = &shaped_segments[range.start];
+            let last_segment = &shaped_segments[range.end - 1];
+
+            let mut line = LayoutLine {
+                range: first_segment.range.start..last_segment.range.end,
+                direction: if self.writing_mode.is_vertical() {
+                    harfrust::Direction::TopToBottom
+                } else {
+                    bidi_info
+                        .paragraphs
+                        .iter()
+                        .find(|p| {
+                            first_segment.range.start >= p.range.start
+                                && first_segment.range.start <= p.range.end
+                        })
+                        .map(|p| {
+                            if p.level.is_rtl() {
+                                harfrust::Direction::RightToLeft
+                            } else {
+                                harfrust::Direction::LeftToRight
+                            }
+                        })
+                        .unwrap_or(harfrust::Direction::LeftToRight)
+                },
+                ..Default::default()
+            };
+
+            let mut current_line_runs: Vec<LineRun<'a>> = Vec::new();
+            let mut line_advance = 0.0f32;
+
+            for segment_idx in range {
+                let segment = &mut shaped_segments[segment_idx];
+                line_advance += segment.advance;
+                for mut run in std::mem::take(&mut segment.runs) {
+                    current_line_runs.push(run);
+                }
+            }
+
+            let levels: Vec<unicode_bidi::Level> = current_line_runs.iter().map(|r| r.level).collect();
+            let visual_indices = reorder_visual(&levels);
+
+            let mut pen_x = 0.0f32;
+            let mut pen_y = 0.0f32;
+
+            for idx in visual_indices {
+                let run = &mut current_line_runs[idx];
+                for glyph in std::mem::take(&mut run.shaped.glyphs) {
+                    line.glyphs.push(glyph);
+                }
+                if self.writing_mode.is_vertical() {
+                    pen_y -= run.shaped.y_advance;
+                } else {
+                    pen_x += run.shaped.x_advance;
+                }
+            }
+
+            line.advance = if self.writing_mode.is_vertical() {
+                pen_y.abs()
+            } else {
+                pen_x
+            };
+
+            lines.push(line);
+        }
 
         // Baselines depend only on line index and metrics. For vertical text we compute absolute X
         // positions within the layout bounds (0..width) so the renderer can draw from the left.
@@ -602,6 +739,40 @@ impl<'a> TextLayout<'a> {
             };
             glyph.x_offset = centered_x_offset(bounds.x_min, bounds.x_max);
         }
+    }
+
+    fn check_collision(&self, lines: &[LayoutLine<'a>], box_top_left: (f32, f32)) -> bool {
+        let Some(mask) = self.mask else {
+            return false;
+        };
+
+        for line in lines {
+            let (bx, by) = line.baseline;
+            let line_height = (bx.abs() + by.abs()).max(1.0); // Rough estimate if not available
+
+            // Check corners of the line's advance box as a heuristic
+            let x1 = box_top_left.0 + bx;
+            let y1 = box_top_left.1 + by; // Baseline
+            
+            // We should check the actual line box (from ascent to descent)
+            // But for now let's use a simpler check: 4 corners of the line's advance
+            let x2 = x1 + if self.writing_mode.is_vertical() { 0.0 } else { line.advance };
+            let y2 = y1 + if self.writing_mode.is_vertical() { line.advance } else { 0.0 };
+
+            let points = [
+                (x1, y1),
+                (x2, y1),
+                (x1, y2),
+                (x2, y2),
+            ];
+
+            for (px, py) in points {
+                if !mask.is_bubble(px.round() as u32, py.round() as u32) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 

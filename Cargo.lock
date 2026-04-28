@@ -4451,6 +4451,7 @@ dependencies = [
  "imageproc",
  "once_cell",
  "rayon",
+ "regex",
  "serde",
  "skrifa",
  "tiny-skia",

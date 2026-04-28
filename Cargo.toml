@@ -166,6 +166,7 @@ petname = "3"
 tauri-plugin-process = "2.3"
 natord = "1.0.9"
 sentry = { version = "0.48", features = ["tracing"] }
+regex = "1"
 
 [patch.crates-io]
 candle-transformers = { git = "https://github.com/mayocream/candle", branch = "flash-attn" }
