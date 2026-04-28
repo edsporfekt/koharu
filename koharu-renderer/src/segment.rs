@@ -239,4 +239,28 @@ mod tests {
         ];
         assert_eq!(segments, expected);
     }
+
+    #[test]
+    fn kinsoku_shori_start_prohibited() {
+        let text = "こんにち、は。"; 
+        let linebreaker = LineBreaker::new();
+        let segments: Vec<&str> = linebreaker.line_segments(text)
+            .iter()
+            .map(|s| &text[s.range.clone()])
+            .collect();
+        // "ち" and "、" should be together. "は" and "。" should be together.
+        assert_eq!(segments, vec!["こ", "ん", "に", "ち、", "は。"]);
+    }
+
+    #[test]
+    fn kinsoku_shori_end_prohibited() {
+        let text = "（笑）"; 
+        let linebreaker = LineBreaker::new();
+        let segments: Vec<&str> = linebreaker.line_segments(text)
+            .iter()
+            .map(|s| &text[s.range.clone()])
+            .collect();
+        // "（" and "笑" should be together. "）" should stay with "笑".
+        assert_eq!(segments, vec!["（笑）"]);
+    }
 }

@@ -74,6 +74,7 @@ struct ShapedSegment<'a> {
     range: Range<usize>,
     next_offset: usize,
     is_mandatory: bool,
+    ends_with_hyphen: bool,
 }
 
 #[derive(Clone)]
@@ -88,6 +89,8 @@ pub struct TextLayout<'a> {
     alignment: Option<TextAlign>,
     mask: Option<&'a MaskData>,
     badness_exponent: f32,
+    hyphen_penalty: f32,
+    min_hyphenate_len: usize,
 }
 
 impl<'a> TextLayout<'a> {
@@ -103,6 +106,8 @@ impl<'a> TextLayout<'a> {
             alignment: None,
             mask: None,
             badness_exponent: 3.0,
+            hyphen_penalty: 1000.0,
+            min_hyphenate_len: 8,
         }
     }
 
@@ -148,6 +153,16 @@ impl<'a> TextLayout<'a> {
 
     pub fn with_badness_exponent(mut self, exponent: f32) -> Self {
         self.badness_exponent = exponent;
+        self
+    }
+
+    pub fn with_hyphen_penalty(mut self, penalty: f32) -> Self {
+        self.hyphen_penalty = penalty;
+        self
+    }
+
+    pub fn with_min_hyphenate_len(mut self, len: usize) -> Self {
+        self.min_hyphenate_len = len;
         self
     }
 
@@ -346,60 +361,55 @@ impl<'a> TextLayout<'a> {
 
         for segment in line_breaker.line_segments(text) {
             let segment_text = &text[segment.range.clone()];
-            let mut segment_runs = Vec::new();
-            let mut segment_advance = 0.0f32;
+            let (mut segment_runs, mut segment_advance) = self.shape_text_runs(
+                segment_text,
+                segment.range.start,
+                &shaper,
+                &fonts,
+                &opts,
+                &bidi_info,
+            );
 
-            if !segment_text.is_empty() {
-                // Subdivide segment into constant BiDi level runs.
-                let mut char_indices = segment_text
-                    .char_indices()
-                    .map(|(id, _)| segment.range.start + id)
-                    .peekable();
+            // Hyphenation: if a single word (segment) is too wide for max_extent, try to split it.
+            if max_extent.is_finite() && segment_advance > max_extent && !segment_text.is_empty() {
+                if let Some((left, right)) =
+                    self.try_hyphenate(segment_text, max_extent, &shaper, &fonts, &opts)
+                {
+                    // Replace one segment with two
+                    let (left_runs, left_advance) = self.shape_text_runs(
+                        &left,
+                        segment.range.start,
+                        &shaper,
+                        &fonts,
+                        &opts,
+                        &bidi_info,
+                    );
+                    shaped_segments.push(ShapedSegment {
+                        runs: left_runs,
+                        advance: left_advance,
+                        range: segment.range.start..segment.range.start + left.len(),
+                        next_offset: segment.range.start + left.len(),
+                        is_mandatory: false,
+                        ends_with_hyphen: true,
+                    });
 
-                while let Some(run_start) = char_indices.next() {
-                    let level = bidi_info.levels[run_start];
-                    let mut run_end = segment.range.end;
-
-                    while let Some(&next_char_start) = char_indices.peek() {
-                        if bidi_info.levels[next_char_start] != level {
-                            run_end = next_char_start;
-                            break;
-                        }
-                        char_indices.next();
-                    }
-
-                    let run_text = &text[run_start..run_end];
-                    let mut run_opts = opts.clone();
-                    run_opts.direction = if self.writing_mode.is_vertical() {
-                        harfrust::Direction::TopToBottom
-                    } else if level.is_rtl() {
-                        harfrust::Direction::RightToLeft
-                    } else {
-                        harfrust::Direction::LeftToRight
-                    };
-
-                    let script_runs = shape_script_runs(&shaper, run_text, &fonts, &run_opts)?;
-                    for mut shaped in script_runs {
-                        if self.writing_mode.is_vertical() && self.center_vertical_punctuation {
-                            self.center_vertical_fullwidth_punctuation(
-                                font_size,
-                                run_text,
-                                &mut shaped.glyphs,
-                            );
-                        }
-
-                        for glyph in &mut shaped.glyphs {
-                            glyph.cluster += run_start as u32;
-                        }
-
-                        segment_advance += if self.writing_mode.is_vertical() {
-                            shaped.y_advance
-                        } else {
-                            shaped.x_advance
-                        };
-
-                        segment_runs.push(LineRun { shaped, level });
-                    }
+                    let (right_runs, right_advance) = self.shape_text_runs(
+                        &right,
+                        segment.range.start + left.len(),
+                        &shaper,
+                        &fonts,
+                        &opts,
+                        &bidi_info,
+                    );
+                    shaped_segments.push(ShapedSegment {
+                        runs: right_runs,
+                        advance: right_advance,
+                        range: segment.range.start + left.len()..segment.range.end,
+                        next_offset: segment.next_offset,
+                        is_mandatory: segment.is_mandatory,
+                        ends_with_hyphen: false,
+                    });
+                    continue;
                 }
             }
 
@@ -409,6 +419,7 @@ impl<'a> TextLayout<'a> {
                 range: segment.range,
                 next_offset: segment.next_offset,
                 is_mandatory: segment.is_mandatory,
+                ends_with_hyphen: false,
             });
         }
 
@@ -431,6 +442,12 @@ impl<'a> TextLayout<'a> {
         for i in 1..=n {
             let mut line_width = 0.0;
             for j in (0..i).rev() {
+                // If any segment before the last one in this line has a mandatory break,
+                // we cannot include it in the same line.
+                if j < i - 1 && shaped_segments[j].is_mandatory {
+                    break;
+                }
+
                 line_width += shaped_segments[j].advance;
 
                 if max_extent.is_finite() && line_width > max_extent && j < i - 1 {
@@ -444,15 +461,16 @@ impl<'a> TextLayout<'a> {
                 };
 
                 let badness = slack.powf(self.badness_exponent);
-                let cost = min_cost[j] + badness;
+                let mut cost = min_cost[j] + badness;
+
+                // Add hyphen penalty if the line ends with a hyphenated segment.
+                if shaped_segments[i - 1].ends_with_hyphen {
+                    cost += self.hyphen_penalty;
+                }
 
                 if cost < min_cost[i] {
                     min_cost[i] = cost;
                     best_prev[i] = j;
-                }
-
-                if shaped_segments[j].is_mandatory {
-                    break;
                 }
             }
         }
@@ -773,6 +791,150 @@ impl<'a> TextLayout<'a> {
             }
         }
         false
+    }
+
+    fn try_hyphenate(
+        &self,
+        word: &str,
+        max_width: f32,
+        shaper: &TextShaper,
+        fonts: &[&'a Font],
+        opts: &ShapingOptions,
+    ) -> Option<(String, String)> {
+        if word.len() < self.min_hyphenate_len {
+            return None;
+        }
+
+        // Try splitting at existing hyphens first
+        if word.contains('-') {
+            let parts: Vec<&str> = word.splitn(2, '-').collect();
+            if parts.len() == 2 {
+                let left = format!("{}-", parts[0]);
+                let right = parts[1].to_string();
+                if self.measure_width(&left, shaper, fonts, opts) <= max_width
+                    && self.measure_width(&right, shaper, fonts, opts) <= max_width
+                {
+                    return Some((left, right));
+                }
+            }
+        }
+
+        // Try brute-force split from the middle
+        let chars: Vec<char> = word.chars().collect();
+        let n = chars.len();
+        let mid = n / 2;
+
+        for d in 0..mid {
+            for &idx in &[mid.saturating_sub(d), mid + d] {
+                if idx < 2 || idx > n - 2 {
+                    continue;
+                }
+
+                let left: String = chars[..idx].iter().collect::<String>() + "-";
+                let right: String = chars[idx..].iter().collect();
+
+                if self.measure_width(&left, shaper, fonts, opts) <= max_width
+                    && self.measure_width(&right, shaper, fonts, opts) <= max_width
+                {
+                    return Some((left, right));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn measure_width(
+        &self,
+        text: &str,
+        shaper: &TextShaper,
+        fonts: &[&'a Font],
+        opts: &ShapingOptions,
+    ) -> f32 {
+        let Ok(runs) = shape_script_runs(shaper, text, fonts, opts) else {
+            return 0.0;
+        };
+        runs.iter()
+            .map(|r| if self.writing_mode.is_vertical() { r.y_advance } else { r.x_advance })
+            .sum()
+    }
+
+    fn shape_text_runs(
+        &self,
+        text: &str,
+        offset: usize,
+        shaper: &TextShaper,
+        fonts: &[&'a Font],
+        opts: &ShapingOptions,
+        bidi_info: &BidiInfo,
+    ) -> (Vec<LineRun<'a>>, f32) {
+        let mut runs = Vec::new();
+        let mut advance = 0.0f32;
+
+        if text.is_empty() {
+            return (runs, advance);
+        }
+
+        let mut char_indices = text.char_indices().map(|(id, _)| offset + id).peekable();
+
+        while let Some(run_start) = char_indices.next() {
+            let level = bidi_info
+                .levels
+                .get(run_start)
+                .copied()
+                .unwrap_or_else(unicode_bidi::Level::ltr);
+            let mut run_end = offset + text.len();
+
+            while let Some(&next_char_start) = char_indices.peek() {
+                let next_level = bidi_info
+                    .levels
+                    .get(next_char_start)
+                    .copied()
+                    .unwrap_or_else(unicode_bidi::Level::ltr);
+                if next_level != level {
+                    run_end = next_char_start;
+                    break;
+                }
+                char_indices.next();
+            }
+
+            let run_text = &text[run_start - offset..run_end - offset];
+            let mut run_opts = opts.clone();
+            run_opts.direction = if self.writing_mode.is_vertical() {
+                harfrust::Direction::TopToBottom
+            } else if level.is_rtl() {
+                harfrust::Direction::RightToLeft
+            } else {
+                harfrust::Direction::LeftToRight
+            };
+
+            let Ok(script_runs) = shape_script_runs(shaper, run_text, fonts, &run_opts) else {
+                continue;
+            };
+            for mut shaped in script_runs {
+                if self.writing_mode.is_vertical() && self.center_vertical_punctuation {
+                    self.center_vertical_fullwidth_punctuation(
+                        opts.font_size,
+                        run_text,
+                        &mut shaped.glyphs,
+                    );
+                }
+
+                for glyph in &mut shaped.glyphs {
+                    glyph.cluster += run_start as u32;
+                }
+
+                advance += if self.writing_mode.is_vertical() {
+                    shaped.y_advance
+                } else {
+                    shaped.x_advance
+                };
+
+                runs.push(LineRun { shaped, level });
+            }
+        }
+
+        (runs, advance)
     }
 }
 
@@ -1142,5 +1304,19 @@ mod tests {
             normalize_vertical_emphasis_punctuation("Hello!?!"),
             "Hello⁉!"
         );
+    }
+
+    #[test]
+    fn hyphenation_breaks_long_words() -> anyhow::Result<()> {
+        let font = any_system_font();
+        let text = "Antidisestablishmentarianism";
+        let layout = TextLayout::new(&font, Some(20.0))
+            .with_max_width(200.0)
+            .with_min_hyphenate_len(5)
+            .run(text)?;
+
+        assert!(layout.lines.len() >= 2);
+        assert!(layout.lines[0].range.end < text.len());
+        Ok(())
     }
 }
