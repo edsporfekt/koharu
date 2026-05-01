@@ -375,8 +375,76 @@ fn postprocess(
             });
         }
     }
+
+    // New Step: Suppress redundant inclusion (e.g. word boxes inside paragraph boxes)
+    suppress_redundant_inclusion(&mut regions, 0.8);
+
     regions.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(regions)
+}
+
+/// Suppresses boxes that are largely contained within another box.
+/// When two boxes have a containment relationship (one is > threshold % inside the other),
+/// the one with the lower confidence score is removed.
+fn suppress_redundant_inclusion(regions: &mut Vec<AnimeTextRegion>, threshold: f32) {
+    if regions.len() < 2 {
+        return;
+    }
+
+    // Sort by score descending to simplify the suppression logic
+    regions.sort_by(|a, b| b.score.total_cmp(&a.score));
+
+    let mut to_remove = std::collections::HashSet::new();
+    for i in 0..regions.len() {
+        if to_remove.contains(&i) {
+            continue;
+        }
+        for j in i + 1..regions.len() {
+            if to_remove.contains(&j) {
+                continue;
+            }
+
+            let b_i = regions[i].bbox;
+            let b_j = regions[j].bbox;
+
+            // Calculate intersection
+            let x_min = b_i[0].max(b_j[0]);
+            let y_min = b_i[1].max(b_j[1]);
+            let x_max = b_i[2].min(b_j[2]);
+            let y_max = b_i[3].min(b_j[3]);
+
+            let inter_w = (x_max - x_min).max(0.0);
+            let inter_h = (y_max - y_min).max(0.0);
+            let inter_area = inter_w * inter_h;
+
+            let area_i = (b_i[2] - b_i[0]) * (b_i[3] - b_i[1]);
+            let area_j = (b_j[2] - b_j[0]) * (b_j[3] - b_j[1]);
+
+            if area_i <= 0.0 || area_j <= 0.0 {
+                continue;
+            }
+
+            // Check if either box is significantly contained in the other
+            let contain_i = inter_area / area_i;
+            let contain_j = inter_area / area_j;
+
+            if contain_i > threshold || contain_j > threshold {
+                // i and j are redundant. Since regions are sorted by score, i has >= score.
+                // However, we should be careful: if i is a small box inside a large box j,
+                // and i has higher score, do we want to keep i or j?
+                // Usually, the one with the higher score is more reliable.
+                // In NMS-style, the winner is 'i'.
+                to_remove.insert(j);
+            }
+        }
+    }
+
+    let mut index = 0;
+    regions.retain(|_| {
+        let keep = !to_remove.contains(&index);
+        index += 1;
+        keep
+    });
 }
 
 fn map_bbox_to_original(bbox: [f32; 4], prepared: &PreparedInput) -> [f32; 4] {

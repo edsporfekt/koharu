@@ -253,11 +253,9 @@ impl<'a> TextLayout<'a> {
                     let off_y = (max_height - total_h).max(0.0) * 0.5;
                     let off_x = (max_width - layout.width).max(0.0) * 0.5;
 
-                    if let Some(mask) = self.mask {
-                        if mask.collides_with(&layout, off_x, off_y) {
-                            current_w *= 0.85;
-                            continue;
-                        }
+                    if self.mask.is_some_and(|mask| mask.collides_with(&layout, off_x, off_y)) {
+                        current_w *= 0.85;
+                        continue;
                     }
 
                     if layout.height <= max_height {
@@ -274,7 +272,7 @@ impl<'a> TextLayout<'a> {
                             score -= 5000.0; // Reject vertical columns for horizontal text
                         }
 
-                        if best_for_size.as_ref().map_or(true, |(_, s)| score > *s) {
+                        if best_for_size.as_ref().is_none_or(|(_, s)| score > *s) {
                             best_for_size = Some((layout, score));
                         }
                     }
@@ -289,14 +287,14 @@ impl<'a> TextLayout<'a> {
                     tracing::info!(
                         target = "koharu_renderer",
                         size = size as u32,
-                        aspect = (layout.width / layout.height) as f32,
+                        aspect = layout.width / layout.height,
                         "Auto-size found best fit"
                     );
                     return Ok(layout);
                 }
 
                 // If the score was bad (e.g. forced vertical), keep track but try smaller sizes.
-                if best.as_ref().map_or(true, |(_, s)| score > *s) {
+                if best.as_ref().is_none_or(|(_, s)| score > *s) {
                     best = Some((layout, score));
                 }
             }
