@@ -1,5 +1,6 @@
 pub mod font;
 pub mod layout;
+pub mod mask;
 pub mod renderer;
 pub mod segment;
 pub mod shape;

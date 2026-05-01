@@ -106,6 +106,7 @@ pub struct TextLayout<'a> {
     max_width: Option<f32>,
     max_height: Option<f32>,
     alignment: Option<TextAlign>,
+    mask: Option<&'a crate::mask::CollisionMask>,
 }
 
 impl<'a> TextLayout<'a> {
@@ -120,6 +121,7 @@ impl<'a> TextLayout<'a> {
             max_width: None,
             max_height: None,
             alignment: None,
+            mask: None,
         }
     }
 
@@ -173,6 +175,11 @@ impl<'a> TextLayout<'a> {
         self
     }
 
+    pub fn with_mask(mut self, mask: &'a crate::mask::CollisionMask) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
     pub fn run(&self, text: &str) -> Result<LayoutRun<'a>> {
         if let Some(font_size) = self.font_size {
             return self.run_with_size(text, font_size);
@@ -195,9 +202,44 @@ impl<'a> TextLayout<'a> {
             iterations += 1;
             let mid = (low + high) / 2;
             let size = mid as f32;
-            let layout = self.run_with_size(text, size)?;
-            if layout.width <= max_width && layout.height <= max_height {
-                best = Some(layout);
+            
+            let mut current_max_width = max_width;
+            let mut current_max_height = max_height;
+            let mut fits = false;
+
+            while current_max_width >= size && current_max_height >= size {
+                let mut layout_opts = self.clone();
+                layout_opts.font_size = Some(size);
+                layout_opts.max_width = Some(current_max_width);
+                layout_opts.max_height = Some(current_max_height);
+
+                let layout = layout_opts.run_with_size(text, size)?;
+
+                if layout.width <= max_width && layout.height <= max_height {
+                    if let Some(mask) = self.mask {
+                        // Position text at the center of the available maximum bounds
+                        let offset_x = (max_width - layout.width).max(0.0) * 0.5;
+                        let offset_y = (max_height - layout.height).max(0.0) * 0.5;
+                        
+                        if mask.collides_with(&layout, offset_x, offset_y) {
+                            // If it fits the rectangular bounds but collides with the mask, try squeezing
+                            // We squeeze by 10% to force line breaks and make the text block more square/vertical
+                            current_max_width *= 0.9;
+                            continue;
+                        }
+                    }
+                    
+                    fits = true;
+                    best = Some(layout);
+                    break;
+                }
+
+                // If it doesn't even fit the rectangular bounds, and we aren't squeezing due to mask, break.
+                // If we are squeezing, we still break because the font size is fundamentally too big for the rect.
+                break;
+            }
+
+            if fits {
                 low = mid + 1;
             } else {
                 high = mid - 1;
