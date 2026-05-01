@@ -16,25 +16,29 @@ impl CollisionMask {
         Self { width, height, data }
     }
 
-    /// Tests if a given rectangle is completely inside the mask's "true" (valid) region.
     pub fn contains_rect(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
         let x0 = x.floor() as isize;
         let y0 = y.floor() as isize;
         let x1 = (x + w).ceil() as isize;
         let y1 = (y + h).ceil() as isize;
 
-        if x0 < 0 || y0 < 0 || x1 > self.width as isize || y1 > self.height as isize {
-            return false; // Out of bounds
-        }
+        // Check 4 corners just like MangaTranslator to allow slight boundary overlap
+        let points = [
+            (x0, y0),
+            (x1, y0),
+            (x0, y1),
+            (x1, y1)
+        ];
 
-        for py in y0..y1 {
-            let row_offset = (py as usize) * self.width;
-            for px in x0..x1 {
-                if !self.data[row_offset + px as usize] {
-                    return false;
-                }
+        for (px, py) in points {
+            let px = px.clamp(0, (self.width as isize) - 1) as usize;
+            let py = py.clamp(0, (self.height as isize) - 1) as usize;
+            
+            if !self.data[py * self.width + px] {
+                return false;
             }
         }
+        
         true
     }
 
@@ -47,17 +51,17 @@ impl CollisionMask {
             
             let (bx, by, bw, bh) = if is_vertical {
                 (
-                    line.baseline.0 - layout.font_size * 0.5,
+                    line.baseline.0 - layout.line_height * 0.5,
                     line.baseline.1,
-                    layout.font_size,
+                    layout.line_height,
                     line.advance
                 )
             } else {
                 (
                     line.baseline.0,
-                    line.baseline.1 - layout.font_size,
+                    line.baseline.1 - layout.ascent,
                     line.advance,
-                    layout.font_size * 1.2
+                    layout.line_height
                 )
             };
 

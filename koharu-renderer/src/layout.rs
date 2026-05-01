@@ -65,6 +65,10 @@ pub struct LayoutRun<'a> {
     pub height: f32,
     /// Font size used to generate this layout.
     pub font_size: f32,
+    /// Line height used for this layout.
+    pub line_height: f32,
+    /// Ascent used for this layout.
+    pub ascent: f32,
 }
 
 #[derive(Clone)]
@@ -193,70 +197,109 @@ impl<'a> TextLayout<'a> {
         let max_height = self.max_height.unwrap_or(f32::INFINITY);
         let max_width = self.max_width.unwrap_or(f32::INFINITY);
 
-        let mut low = 6;
-        let mut high = 300;
-        let mut best: Option<LayoutRun<'a>> = None;
-        let mut iterations = 0u32;
+        // Normalize text: collapse internal spaces and trim.
+        let text = if text.contains('\n') || text.contains('\r') {
+            text.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let text = text.trim();
 
-        while low <= high {
-            iterations += 1;
-            let mid = (low + high) / 2;
-            let size = mid as f32;
+        let mut best: Option<(LayoutRun<'a>, f32)> = None;
+        
+        // Preferred aspect ratio (Width/Height)
+        let target_ratio = if self.writing_mode.is_vertical() { 0.7 } else { 1.4 };
+
+        // Scan font sizes from large to small.
+        let scan_start = self.font_size.unwrap_or(48.0).min(200.0) as i32;
+        for size_int in (6..=scan_start).rev().step_by(2) {
+            let size = size_int as f32;
             
-            let mut current_max_width = max_width;
-            let mut current_max_height = max_height;
-            let mut fits = false;
+            // Heuristic for the "natural" side of a square block
+            let total_advance = text.chars().count() as f32 * size * 0.7; 
+            let side = (total_advance * size * 1.2).sqrt();
+            
+            // Try 3 different layout strategies for this font size:
+            // 1. Ideal/Balanced width
+            // 2. Wide/Landscape width
+            // 3. Maximum balloon width
+            let candidate_widths = [
+                side * 1.1,         // Balanced
+                side * 1.8,         // Wide
+                max_width           // Full Balloon
+            ];
 
-            while current_max_width >= size && current_max_height >= size {
-                let mut layout_opts = self.clone();
-                layout_opts.font_size = Some(size);
-                layout_opts.max_width = Some(current_max_width);
-                layout_opts.max_height = Some(current_max_height);
+            let mut best_for_size: Option<(LayoutRun<'a>, f32)> = None;
 
-                let layout = layout_opts.run_with_size(text, size)?;
+            for &target_w in &candidate_widths {
+                let mut current_w = max_width.min(target_w).max(size * 2.0);
+                
+                // For each target width, we still might need to squeeze slightly
+                // to fit a circular/irregular balloon.
+                for _s in 0..3 {
+                    let mut layout_opts = self.clone();
+                    layout_opts.font_size = Some(size);
+                    layout_opts.max_width = Some(current_w);
+                    layout_opts.max_height = Some(max_height);
 
-                if layout.width <= max_width && layout.height <= max_height {
+                    let layout = layout_opts.run_with_size(text, size)?;
+                    
+                    // Centering for collision check
+                    let total_h = layout.lines.len() as f32 * layout.line_height;
+                    let off_y = (max_height - total_h).max(0.0) * 0.5;
+                    let off_x = (max_width - layout.width).max(0.0) * 0.5;
+
                     if let Some(mask) = self.mask {
-                        // Position text at the center of the available maximum bounds
-                        let offset_x = (max_width - layout.width).max(0.0) * 0.5;
-                        let offset_y = (max_height - layout.height).max(0.0) * 0.5;
-                        
-                        if mask.collides_with(&layout, offset_x, offset_y) {
-                            // If it fits the rectangular bounds but collides with the mask, try squeezing
-                            // We squeeze by 10% to force line breaks and make the text block more square/vertical
-                            current_max_width *= 0.9;
+                        if mask.collides_with(&layout, off_x, off_y) {
+                            current_w *= 0.85;
                             continue;
                         }
                     }
                     
-                    fits = true;
-                    best = Some(layout);
+                    if layout.height <= max_height {
+                        let aspect = layout.width / layout.height.max(1.0);
+                        let aspect_err = (aspect / target_ratio).ln().abs();
+                        
+                        // Score calculation:
+                        // 1. Prioritize SIZE above all (size * 1000)
+                        // 2. Penalize aspect ratio deviation
+                        // 3. Heavily penalize "dik dizgi" (aspect < 0.5) in horizontal mode
+                        let mut score = (size * 1000.0) - (aspect_err * 100.0);
+                        
+                        if !self.writing_mode.is_vertical() && aspect < 0.5 {
+                            score -= 5000.0; // Reject vertical columns for horizontal text
+                        }
+
+                        if best_for_size.as_ref().map_or(true, |(_, s)| score > *s) {
+                            best_for_size = Some((layout, score));
+                        }
+                    }
                     break;
                 }
-
-                // If it doesn't even fit the rectangular bounds, and we aren't squeezing due to mask, break.
-                // If we are squeezing, we still break because the font size is fundamentally too big for the rect.
-                break;
             }
 
-            if fits {
-                low = mid + 1;
-            } else {
-                high = mid - 1;
+            if let Some((layout, score)) = best_for_size {
+                // If we found a fitting layout for this size that isn't a "dik dizgi" column,
+                // we take it. This ensures we use the largest possible font size.
+                if score > 0.0 {
+                    tracing::info!(
+                        target = "koharu_renderer",
+                        size = size as u32,
+                        aspect = (layout.width / layout.height) as f32,
+                        "Auto-size found best fit"
+                    );
+                    return Ok(layout);
+                }
+                
+                // If the score was bad (e.g. forced vertical), keep track but try smaller sizes.
+                if best.as_ref().map_or(true, |(_, s)| score > *s) {
+                    best = Some((layout, score));
+                }
             }
         }
 
-        // If no size fits within constraints, fall back to the smallest size.
-        // This ensures we always render something even if the box is very small.
-        if best.is_none() {
-            best = Some(self.run_with_size(text, 6.0)?);
-        }
-        tracing::info!(
-            iterations,
-            font_size = best.as_ref().map(|b| b.font_size as u32).unwrap_or(0),
-            "auto_size done"
-        );
-        Ok(best.unwrap())
+        let (final_layout, _) = best.ok_or_else(|| anyhow::anyhow!("Could not find a fitting layout"))?;
+        Ok(final_layout)
     }
 
     fn run_with_size(&self, text: &str, font_size: f32) -> Result<LayoutRun<'a>> {
@@ -532,23 +575,8 @@ impl<'a> TextLayout<'a> {
             }
             height = (max_y - min_y).max(0.0);
 
-            // Center vertically if requested and we have a container height.
-            if !self.writing_mode.is_vertical()
-                && effective_alignment == TextAlign::Center
-                && let Some(max_h) = self.max_height.filter(|&h| h.is_finite() && h > 0.0)
-            {
-                let offset = (max_h - height).max(0.0) * 0.5;
-                if offset > 0.0 {
-                    for line in &mut lines {
-                        line.baseline.1 += offset;
-                    }
-                    height = height.max(max_h);
-                }
-            }
-
             // Apply horizontal alignment for horizontal writing mode (per-line alignment).
             if !self.writing_mode.is_vertical()
-                && max_extent_finite
                 && effective_alignment != TextAlign::Left
             {
                 // Anchor to the run width. If Center, this is a tight width.
@@ -566,6 +594,26 @@ impl<'a> TextLayout<'a> {
                     }
                 }
             }
+
+            // Center vertically if requested and we have a container height.
+            // Note: In run_auto, we handle this manually for the mask check,
+            // but we need it here for the final LayoutRun.
+            if !self.writing_mode.is_vertical()
+                && effective_alignment == TextAlign::Center
+                && let Some(max_h) = self.max_height.filter(|&h| h.is_finite() && h > 0.0)
+            {
+                let total_logical_height = lines.len() as f32 * line_height;
+                let offset = (max_h - total_logical_height).max(0.0) * 0.5;
+                if offset > 0.0 {
+                    let current_first_baseline = lines.first().map(|l| l.baseline.1).unwrap_or(0.0);
+                    let target_first_baseline = offset + ascent;
+                    let shift = target_first_baseline - current_first_baseline;
+                    for line in &mut lines {
+                        line.baseline.1 += shift;
+                    }
+                    height = height.max(max_h);
+                }
+            }
         }
 
         Ok(LayoutRun {
@@ -573,6 +621,8 @@ impl<'a> TextLayout<'a> {
             width,
             height,
             font_size,
+            line_height,
+            ascent,
         })
     }
 
@@ -881,9 +931,9 @@ fn optimal_line_breaks(segments: &[LineBreakMeasure], max_extent: f32) -> Vec<us
 
 fn line_break_badness(line_advance: f32, max_extent: f32) -> f32 {
     if line_advance <= max_extent {
-        (max_extent - line_advance).powi(3)
+        (max_extent - line_advance).powi(2)
     } else {
-        (line_advance - max_extent).powi(3) * LINE_BREAK_OVERFLOW_MULTIPLIER
+        (line_advance - max_extent).powi(2) * LINE_BREAK_OVERFLOW_MULTIPLIER
     }
 }
 

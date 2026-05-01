@@ -183,6 +183,18 @@ opt-level = 3
 [profile.dev.package.imageproc]
 opt-level = 3
 
+[profile.dev.package.candle-core]
+opt-level = 3
+
+[profile.dev.package.candle-nn]
+opt-level = 3
+
+[profile.dev.package.candle-transformers]
+opt-level = 3
+
+[profile.dev.package.tokenizers]
+opt-level = 3
+
 [profile.release-with-debug]
 inherits = "release"
 debug-assertions = true
