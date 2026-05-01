@@ -253,7 +253,10 @@ impl<'a> TextLayout<'a> {
                     let off_y = (max_height - total_h).max(0.0) * 0.5;
                     let off_x = (max_width - layout.width).max(0.0) * 0.5;
 
-                    if self.mask.is_some_and(|mask| mask.collides_with(&layout, off_x, off_y)) {
+                    if self
+                        .mask
+                        .is_some_and(|mask| mask.collides_with(&layout, off_x, off_y))
+                    {
                         current_w *= 0.85;
                         continue;
                     }
