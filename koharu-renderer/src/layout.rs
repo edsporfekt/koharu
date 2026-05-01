@@ -206,34 +206,38 @@ impl<'a> TextLayout<'a> {
         let text = text.trim();
 
         let mut best: Option<(LayoutRun<'a>, f32)> = None;
-        
+
         // Preferred aspect ratio (Width/Height)
-        let target_ratio = if self.writing_mode.is_vertical() { 0.7 } else { 1.4 };
+        let target_ratio = if self.writing_mode.is_vertical() {
+            0.7
+        } else {
+            1.4
+        };
 
         // Scan font sizes from large to small.
         let scan_start = self.font_size.unwrap_or(48.0).min(200.0) as i32;
         for size_int in (6..=scan_start).rev().step_by(2) {
             let size = size_int as f32;
-            
+
             // Heuristic for the "natural" side of a square block
-            let total_advance = text.chars().count() as f32 * size * 0.7; 
+            let total_advance = text.chars().count() as f32 * size * 0.7;
             let side = (total_advance * size * 1.2).sqrt();
-            
+
             // Try 3 different layout strategies for this font size:
             // 1. Ideal/Balanced width
             // 2. Wide/Landscape width
             // 3. Maximum balloon width
             let candidate_widths = [
-                side * 1.1,         // Balanced
-                side * 1.8,         // Wide
-                max_width           // Full Balloon
+                side * 1.1, // Balanced
+                side * 1.8, // Wide
+                max_width,  // Full Balloon
             ];
 
             let mut best_for_size: Option<(LayoutRun<'a>, f32)> = None;
 
             for &target_w in &candidate_widths {
                 let mut current_w = max_width.min(target_w).max(size * 2.0);
-                
+
                 // For each target width, we still might need to squeeze slightly
                 // to fit a circular/irregular balloon.
                 for _s in 0..3 {
@@ -243,7 +247,7 @@ impl<'a> TextLayout<'a> {
                     layout_opts.max_height = Some(max_height);
 
                     let layout = layout_opts.run_with_size(text, size)?;
-                    
+
                     // Centering for collision check
                     let total_h = layout.lines.len() as f32 * layout.line_height;
                     let off_y = (max_height - total_h).max(0.0) * 0.5;
@@ -255,17 +259,17 @@ impl<'a> TextLayout<'a> {
                             continue;
                         }
                     }
-                    
+
                     if layout.height <= max_height {
                         let aspect = layout.width / layout.height.max(1.0);
                         let aspect_err = (aspect / target_ratio).ln().abs();
-                        
+
                         // Score calculation:
                         // 1. Prioritize SIZE above all (size * 1000)
                         // 2. Penalize aspect ratio deviation
                         // 3. Heavily penalize "dik dizgi" (aspect < 0.5) in horizontal mode
                         let mut score = (size * 1000.0) - (aspect_err * 100.0);
-                        
+
                         if !self.writing_mode.is_vertical() && aspect < 0.5 {
                             score -= 5000.0; // Reject vertical columns for horizontal text
                         }
@@ -290,7 +294,7 @@ impl<'a> TextLayout<'a> {
                     );
                     return Ok(layout);
                 }
-                
+
                 // If the score was bad (e.g. forced vertical), keep track but try smaller sizes.
                 if best.as_ref().map_or(true, |(_, s)| score > *s) {
                     best = Some((layout, score));
@@ -298,7 +302,8 @@ impl<'a> TextLayout<'a> {
             }
         }
 
-        let (final_layout, _) = best.ok_or_else(|| anyhow::anyhow!("Could not find a fitting layout"))?;
+        let (final_layout, _) =
+            best.ok_or_else(|| anyhow::anyhow!("Could not find a fitting layout"))?;
         Ok(final_layout)
     }
 
@@ -576,9 +581,7 @@ impl<'a> TextLayout<'a> {
             height = (max_y - min_y).max(0.0);
 
             // Apply horizontal alignment for horizontal writing mode (per-line alignment).
-            if !self.writing_mode.is_vertical()
-                && effective_alignment != TextAlign::Left
-            {
+            if !self.writing_mode.is_vertical() && effective_alignment != TextAlign::Left {
                 // Anchor to the run width. If Center, this is a tight width.
                 // If Right, this is the container width.
                 let anchor = width;

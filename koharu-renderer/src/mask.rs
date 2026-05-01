@@ -13,7 +13,11 @@ pub struct CollisionMask {
 impl CollisionMask {
     pub fn new(width: usize, height: usize, data: Vec<bool>) -> Self {
         assert_eq!(width * height, data.len());
-        Self { width, height, data }
+        Self {
+            width,
+            height,
+            data,
+        }
     }
 
     pub fn contains_rect(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
@@ -23,22 +27,17 @@ impl CollisionMask {
         let y1 = (y + h).ceil() as isize;
 
         // Check 4 corners just like MangaTranslator to allow slight boundary overlap
-        let points = [
-            (x0, y0),
-            (x1, y0),
-            (x0, y1),
-            (x1, y1)
-        ];
+        let points = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
 
         for (px, py) in points {
             let px = px.clamp(0, (self.width as isize) - 1) as usize;
             let py = py.clamp(0, (self.height as isize) - 1) as usize;
-            
+
             if !self.data[py * self.width + px] {
                 return false;
             }
         }
-        
+
         true
     }
 
@@ -48,20 +47,20 @@ impl CollisionMask {
         for line in &layout.lines {
             // Conservative bounding box estimation for the line
             let is_vertical = line.direction == harfrust::Direction::TopToBottom;
-            
+
             let (bx, by, bw, bh) = if is_vertical {
                 (
                     line.baseline.0 - layout.line_height * 0.5,
                     line.baseline.1,
                     layout.line_height,
-                    line.advance
+                    line.advance,
                 )
             } else {
                 (
                     line.baseline.0,
                     line.baseline.1 - layout.ascent,
                     line.advance,
-                    layout.line_height
+                    layout.line_height,
                 )
             };
 
